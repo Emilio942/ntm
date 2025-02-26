@@ -9,13 +9,14 @@ class NTMController(nn.Module):
     Controller-Komponente des Neural Turing Machine.
     Verarbeitet die Eingabe und die gelesenen Speichervektoren.
     """
-    def __init__(self, input_size, hidden_size, output_size, memory_word_size, num_heads):
+    def __init__(self, input_size, hidden_size, output_size, memory_word_size, num_heads, shift_range=3):
         super(NTMController, self).__init__()
         self.input_size = input_size
         self.hidden_size = hidden_size
         self.output_size = output_size
         self.memory_word_size = memory_word_size
         self.num_heads = num_heads
+        self.shift_range = shift_range
         
         # Controller-Netzwerk (LSTM)
         self.lstm = nn.LSTM(
@@ -24,11 +25,13 @@ class NTMController(nn.Module):
             batch_first=True
         )
         
+        # Berechne die Anzahl der Parameter für die Köpfe
+        read_head_size = memory_word_size + 1 + 1 + shift_range + 1
+        write_head_size = memory_word_size + 1 + 1 + shift_range + 1 + memory_word_size * 2
+        total_head_params = num_heads * (read_head_size + write_head_size)
+        
         # Ausgang für die NTM-Köpfe
-        self.head_params = nn.Linear(
-            hidden_size, 
-            num_heads * (5 + memory_word_size * 2)  # 5 für Adressierungsparameter + 2*word_size für erase & add
-        )
+        self.head_params = nn.Linear(hidden_size, total_head_params)
         
         # Ausgang für die Ausgabe
         self.output = nn.Linear(hidden_size, output_size)
@@ -301,16 +304,12 @@ class NeuralTuringMachine(nn.Module):
             hidden_size=hidden_size,
             output_size=output_size,
             memory_word_size=word_size,
-            num_heads=num_heads
+            num_heads=num_heads,
+            shift_range=shift_range
         )
         
         # Speicher
         self.memory = NTMMemory(memory_size, word_size)
-        
-        # Köpfe
-        # Parameter für jeden Kopf: k, beta, g, s, gamma, (erase, add für Schreibköpfe)
-        head_params_per_read = word_size + 1 + 1 + shift_range + 1
-        head_params_per_write = head_params_per_read + word_size * 2
         
         # Lese- und Schreibköpfe
         self.read_heads = nn.ModuleList([
@@ -326,27 +325,35 @@ class NeuralTuringMachine(nn.Module):
         head_params: [batch_size, seq_len, total_head_params]
         """
         # Parameter pro Kopftyp
-        head_params_per_read = self.word_size + 1 + 1 + self.shift_range + 1
-        head_params_per_write = head_params_per_read + self.word_size * 2
+        read_head_size = self.word_size + 1 + 1 + self.shift_range + 1
+        write_head_size = self.word_size + 1 + 1 + self.shift_range + 1 + self.word_size * 2
         
-        total_read_params = head_params_per_read * self.num_heads
+        # Gesamtanzahl der Parameter
+        total_param_size = read_head_size * self.num_heads + write_head_size * self.num_heads
         
-        # Aufteilen der Parameter
-        read_params = head_params[:, :, :total_read_params]
-        write_params = head_params[:, :, total_read_params:]
+        # Überprüfe, ob die Parameter-Dimensionen übereinstimmen
+        if head_params.size(2) != total_param_size:
+            raise ValueError(f"Expected head_params to have {total_param_size} features, got {head_params.size(2)}")
         
         # Aufteilen für individuelle Köpfe
         read_head_params = []
-        for i in range(self.num_heads):
-            start_idx = i * head_params_per_read
-            end_idx = start_idx + head_params_per_read
-            read_head_params.append(read_params[:, :, start_idx:end_idx])
-        
         write_head_params = []
+        
+        param_idx = 0
+        
+        # Lese-Köpfe
         for i in range(self.num_heads):
-            start_idx = i * head_params_per_write
-            end_idx = start_idx + head_params_per_write
-            write_head_params.append(write_params[:, :, start_idx:end_idx])
+            start_idx = param_idx
+            end_idx = start_idx + read_head_size
+            read_head_params.append(head_params[:, :, start_idx:end_idx])
+            param_idx = end_idx
+        
+        # Schreib-Köpfe
+        for i in range(self.num_heads):
+            start_idx = param_idx
+            end_idx = start_idx + write_head_size
+            write_head_params.append(head_params[:, :, start_idx:end_idx])
+            param_idx = end_idx
         
         return read_head_params, write_head_params
     
